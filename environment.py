@@ -16,7 +16,7 @@ class FishSchoolEnv:
     #     self.orientations = np.random.uniform(0, 2*np.pi, num_fish)
 
        # class FishSchoolEnv:
-    def __init__(self, num_fish=100, grid_size=60, velocity=3, omega_max=np.pi/3, dt=1, perception_range=15, obs_grid_size=16):
+    def __init__(self, num_fish=100, grid_size=60, velocity=3, omega_max=np.pi/3, dt=1, perception_range=np.random.normal(15, 2), obs_grid_size=16):
         self.num_fish = num_fish
         self.grid_size = grid_size
         self.velocity = velocity
@@ -104,7 +104,7 @@ class FishSchoolEnv:
         """
         Compute the reward for a given fish.
         +Reward for having more neighbors (cohesion).
-        -Penalty for collisions (overcrowding).
+        -Penalty for collisions (overcrowding).  
         """
         focal_pos = self.positions[fish_index]
         distances = np.linalg.norm(self.positions - focal_pos, axis=1)
@@ -113,7 +113,11 @@ class FishSchoolEnv:
         num_neighbors = np.sum((distances < self.perception_range) & (distances > 0))  # Exclude self
 
     # Define reward function
-        reward = num_neighbors * 0.1  # More neighbors, higher reward
+        alignment = np.mean(np.cos(self.orientations[num_neighbors] - self.orientations[fish_index]))
+        cohesion = np.linalg.norm(np.mean(self.positions[num_neighbors], axis=0) - self.positions[fish_index])
+        reward = 0.5 * alignment + 0.5 * cohesion
+
+        #reward = num_neighbors * 0.5  # More neighbors, higher reward
         if num_neighbors > 10:  # If too many, penalize (collision-like behavior)
             reward -= 1.0
 

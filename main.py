@@ -6,7 +6,7 @@ from mean_field_q import MeanFieldQLearningAgent
 import numpy as np
 
 # Load trained agent
-env = FishSchoolEnv(num_fish=50)
+env = FishSchoolEnv(num_fish=10)
 agent = MeanFieldQLearningAgent(state_dim=16, action_dim=3)
 
 # Run simulation with trained agent

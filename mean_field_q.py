@@ -9,35 +9,44 @@ class MeanFieldQNetwork(nn.Module):
     """Neural network for Mean Field Q-Learning."""
     def __init__(self, state_dim, action_dim):
         super(MeanFieldQNetwork, self).__init__()
-        self.fc1 = nn.Linear(512, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_dim)
+        self.fc1 = nn.Linear(512, 512)
+        self.fc2 = nn.Linear(512, 512)
+        self.fc3 = nn.Linear(512, 256)
+        self.fc4 = nn.Linear(256, 128)
+        self.fc5 = nn.Linear(128, 32)
+
+        self.final = nn.Linear(32, action_dim)
 
     def forward(self, state):
         x = torch.relu(self.fc1(state))
         x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        x = torch.relu(self.fc3(x))
+        x = torch.relu(self.fc4(x))
+        x = torch.relu(self.fc5(x))
+        return self.final(x)
 
 class MeanFieldQLearningAgent:
-    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
+    def __init__(self, state_dim, action_dim, lr=0.0001, gamma=0.95):
         self.q_network = MeanFieldQNetwork(state_dim, action_dim)
         self.target_q_network = MeanFieldQNetwork(state_dim, action_dim)
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
         self.gamma = gamma
         self.replay_buffer = []
-        self.batch_size = 32
+        self.batch_size = 64
         self.epsilon = 1.0
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.05
 
     def select_action(self, state):
         if np.random.rand() < self.epsilon:
-            return np.random.randint(0, 3)  # Random action: left, straight, right
+            action_idx = np.random.randint(0, 3)
+            
         else:
-            state_tensor = torch.FloatTensor(state).view(1, -1)  # Flatten to match 512 input
-            #print(f"DEBUG: Select action state shape: {state_tensor.shape}")  # Debug print
+            state_tensor = torch.FloatTensor(state).view(1, -1)
             q_values = self.q_network(state_tensor)
-            return torch.argmax(q_values).item()
+            action_idx = torch.argmax(q_values).item()
+        
+        return action_idx  # or: return self.angle_range[action_idx] if you want angle
 
     def update(self):
         if len(self.replay_buffer) < self.batch_size:

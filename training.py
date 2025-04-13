@@ -4,10 +4,10 @@ import numpy as np
 
 # Initialize environment and agent
 env = FishSchoolEnv(num_fish=50)
-agent = MeanFieldQLearningAgent(state_dim=16, action_dim=3)  # 3 Actions (left, straight, right)
+agent = MeanFieldQLearningAgent(state_dim=16, action_dim=180)  # 3 Actions (left, straight, right)
 
 # Training loop
-for episode in range(10000):
+for episode in range(1000):
     states = [env.get_state(i) for i in range(env.num_fish)]
     actions = np.array([agent.select_action(s) for s in states])
 
@@ -23,8 +23,10 @@ for episode in range(10000):
 
     agent.update()
 
-    if episode % 100 == 0:
-        print(f"Episode {episode}: Training in progress...")
+    agent.epsilon = max(0.05, agent.epsilon * 0.995)
+
+    if episode % 50 == 0:
+        print(f"Episode {episode} - Average Reward: {np.mean(rewards):.2f}")
 
 print("Training complete!")
 

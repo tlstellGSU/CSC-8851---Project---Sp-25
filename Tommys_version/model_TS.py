@@ -6,138 +6,236 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from collections import deque
+import torch.nn.functional as F
 
 # -------------------------------
 # Define the Neural Network Class
 # -------------------------------
 
-class MeanFieldQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(MeanFieldQNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_dim + 1, 512)  # <- Add 1 for mean action
-        self.fc2 = nn.Linear(512, 512)
-        self.fc3 = nn.Linear(512, 256)
-        self.fc4 = nn.Linear(256, 128)
-        self.fc5 = nn.Linear(128, 32)
-        self.final = nn.Linear(32, action_dim)
+class MultiAgentNet(nn.Module):
+    def __init__(self, spatial_channels=2, orientation_dim=3, action_reward_dim=2, 
+                 num_actions=5, dropout_p=0.3):
+        """
+        :param spatial_channels: Number of input channels for spatial observations (default: 2)
+        :param orientation_dim: Size of orientation input (4 per agent)
+        :param action_reward_dim: Size of last action + last reward input (default: 2)
+        :param num_actions: M — number of possible actions
+        :param dropout_p: Dropout probability
+        """
+        super(MultiAgentNet, self).__init__()
+        self.num_outputs = 2 * num_actions + 1
+        self.dropout_p = dropout_p
 
-    def forward(self, x):  # x is full input: state + mean_action
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = torch.relu(self.fc4(x))
-        x = torch.relu(self.fc5(x))
-        return self.final(x)
+        # Branch A - Spatial input (shape: [B, 2, H, W], where H=W=2k+1)
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(spatial_channels, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
 
+        # This linear layer will convert the flattened spatial features to 256
+        self.spatial_fc = nn.Sequential(
+            nn.Flatten(),
+            nn.LazyLinear(256),  # ← This is now correct
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
+        )
+        # Branch B - Orientation input
+        self.orientation_fc = nn.Sequential(
+            nn.Linear(orientation_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
+        )
+
+        # Branch C - Last action + reward
+        self.action_reward_fc = nn.Sequential(
+            nn.Linear(action_reward_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
+        )
+
+        # Final fully connected layers
+        self.fc1 = nn.Sequential(
+            nn.Linear(256 + 32 + 32, 128),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
+        )
+
+        self.fc2 = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
+        )
+
+        self.output_layer = nn.Linear(64, self.num_outputs)
+
+    def forward(self, spatial_input, orientation_input, action_reward_input):
+        x_spatial = self.spatial_conv(spatial_input)
+        print(f"Flattened spatial shape: {x_spatial.shape}")        
+        if isinstance(self.spatial_fc[1], nn.Linear) and self.spatial_fc[1].in_features is None:
+            # Dynamically set the input size for the first Linear layer in spatial_fc
+            flattened_size = x_spatial.view(x_spatial.size(0), -1).size(1)
+            self.spatial_fc[1] = nn.Linear(flattened_size, 256).to(x_spatial.device)
+        
+        x_spatial = self.spatial_fc(x_spatial)
+
+        x_orient = self.orientation_fc(orientation_input)
+        x_action = self.action_reward_fc(action_reward_input)
+
+        x = torch.cat([x_spatial, x_orient, x_action], dim=1)
+        x = self.fc1(x)
+        x = self.fc2(x)
+
+        out = self.output_layer(x)
+        return F.softmax(out, dim=1)
 
 # -------------------------------
 # Define the Fish Agent Class
 # -------------------------------
 
 class Fish:
-    def __init__(self, position, velocity, max_speed=4.0, max_force=0.1, perception_radius=15):
+    def __init__(self, position, orientation, max_speed=4.0, omega_max=np.pi/4, M=9, 
+                 
+                 #perception_radius=np.random.normal(15,2)
+                 perception_radius=15
+                 
+                 ):
+        """
+        :param position: Initial (x, y) position
+        :param orientation: Initial orientation θ in radians
+        :param max_speed: Constant speed
+        :param omega_max: Max angular change in radians
+        :param M: Number of discrete actions (must be odd)
+        :param perception_radius: For future behavior rules
+        """
+        assert M % 2 == 1, "M must be an odd number"
+        
         self.position = np.array(position, dtype=float)
-        self.velocity = np.array(velocity, dtype=float)
-        self.acceleration = np.zeros(2)
+        self.orientation = float(orientation)
         self.max_speed = max_speed
-        self.max_force = max_force
+        self.omega_max = omega_max
+        self.M = M
         self.perception_radius = perception_radius
 
-    def update(self):
-        # Update velocity and limit it to max_speed.
-        self.velocity += self.acceleration
-        speed = np.linalg.norm(self.velocity)
-        if speed > self.max_speed:
-            self.velocity = (self.velocity / speed) * self.max_speed
+    def get_discrete_actions(self):
+        """
+        Returns the list of M discrete angular changes between [-omega_max, omega_max]
+        """
+        return np.linspace(-self.omega_max, self.omega_max, self.M)
 
-        # Update position.
-        self.position += self.velocity
+    def update(self, action_index):
+        """
+        Updates the fish's position and orientation using first-order kinematics
+        :param action_index: Integer index in [0, M-1] representing chosen angular adjustment
+        """
+        omega = self.get_discrete_actions()[action_index]
 
-        # Reset acceleration.
-        self.acceleration *= 0
+        # Update orientation
+        self.orientation += omega
 
-    def apply_force(self, force):
-        self.acceleration += force
+        # Normalize orientation to [-pi, pi] for consistency (optional but helpful)
+        self.orientation = (self.orientation + np.pi) % (2 * np.pi) - np.pi
 
-    def apply_behavior(self, fishes):
-        separation = self.separate(fishes)
-        alignment  = self.align(fishes)
-        cohesion   = self.cohere(fishes)
+        # Update position
+        dx = self.max_speed * np.cos(self.orientation)
+        dy = self.max_speed * np.sin(self.orientation)
+        self.position += np.array([dx, dy])
+
+    def get_state(self):
+        """
+        Returns the current state as a tuple: (x, y, theta)
+        """
+        return (self.position[0], self.position[1], self.orientation)
+
+    def compute_alignment_metric(self, fishes):
+        """
+        Computes the alignment metric ϕ:
+          ϕ = (1/N) * | sum (normalized velocity vector of each fish) |
+        Uses all fishes (neighbors including self). Since all fish move at constant speed,
+        the normalized velocity vector for a fish is [cos(theta), sin(theta)].
         
-        # Weight each behavior: these weights can be tuned.
-        separation_weight = 1.5
-        alignment_weight  = 1.0
-        cohesion_weight   = 1.0
+        :param fishes: List of all Fish instances.
+        :return: Scalar value representing the alignment.
+        """
+        N = len(fishes)
+        sum_norm_vel = np.zeros(2)
+        for fish in fishes:
+            # Compute normalized velocity vector from orientation.
+            norm_vel = np.array([np.cos(fish.orientation), np.sin(fish.orientation)])
+            sum_norm_vel += norm_vel
+        phi = np.linalg.norm(sum_norm_vel) / N
+        return phi
+
+    def compute_cohesion_metric(self, fishes):
+        """
+        Computes the cohesion metric ξ:
+          ξ = (1/N) * (number of fishes within perception radius)
+        Here, each fish counts as a neighbor if its Euclidean distance from self is less 
+        than or equal to the perception_radius. (Includes self.)
         
-        self.apply_force(separation * separation_weight)
-        self.apply_force(alignment * alignment_weight)
-        self.apply_force(cohesion * cohesion_weight)
+        :param fishes: List of all Fish instances.
+        :return: Scalar value representing the cohesion.
+        """
+        N_total = len(fishes)
+        count_neighbors = 0
+        for fish in fishes:
+            # Use Euclidean distance.
+            distance = np.linalg.norm(self.position - fish.position)
+            if distance <= self.perception_radius:
+                count_neighbors += 1
+        xi = count_neighbors / N_total
+        return xi
 
-    def separate(self, fishes):
-        desired_separation = self.perception_radius * 0.5  # adjust as needed
-        steer = np.zeros(2)
-        total = 0
-
-        for other in fishes:
-            if other is self:
+    def compute_density_metric(self, fishes):
+        """
+        Computes the density metric, ANNR:
+          D_actual = average distance to all neighbors (excluding self) within the perception radius.
+          D_expected = 0.5 / sqrt(total_agents / A), where A = π * (perception_radius)^2.
+          ANNR = D_actual / D_expected.
+          
+        If there are no other fishes within perception, D_actual is set equal to perception_radius.
+        
+        :param fishes: List of all Fish instances.
+        :return: Scalar value representing the density metric.
+        """
+        total_agents = len(fishes)
+        distances = []
+        for fish in fishes:
+            # Exclude self to avoid zero distance.
+            if fish is self:
                 continue
-            diff = self.position - other.position
-            distance = np.linalg.norm(diff)
-            if 0 < distance < desired_separation:
-                steer += diff / distance  # weighted by inverse distance
-                total += 1
-        if total > 0:
-            steer /= total
-            if np.linalg.norm(steer) > 0:
-                steer = (steer / np.linalg.norm(steer)) * self.max_speed - self.velocity
-                if np.linalg.norm(steer) > self.max_force:
-                    steer = (steer / np.linalg.norm(steer)) * self.max_force
-        return steer
+            distance = np.linalg.norm(self.position - fish.position)
+            if distance <= self.perception_radius:
+                distances.append(distance)
+        if len(distances) > 0:
+            D_actual = np.mean(distances)
+        else:
+            # If no neighbors, use perception_radius as a default.
+            D_actual = self.perception_radius
+        
+        A = np.pi * (self.perception_radius ** 2)
+        D_expected = 0.5 / np.sqrt(total_agents / A)
+        annr = D_actual / D_expected
+        return annr
 
-    def align(self, fishes):
-        perception = self.perception_radius
-        avg_velocity = np.zeros(2)
-        total = 0
-
-        for other in fishes:
-            if other is self:
-                continue
-            distance = np.linalg.norm(self.position - other.position)
-            if distance < perception:
-                avg_velocity += other.velocity
-                total += 1
-        if total > 0:
-            avg_velocity /= total
-            if np.linalg.norm(avg_velocity) > 0:
-                avg_velocity = (avg_velocity / np.linalg.norm(avg_velocity)) * self.max_speed
-            steer = avg_velocity - self.velocity
-            if np.linalg.norm(steer) > self.max_force:
-                steer = (steer / np.linalg.norm(steer)) * self.max_force
-            return steer
-        return np.zeros(2)
-
-    def cohere(self, fishes):
-        perception = self.perception_radius
-        center_of_mass = np.zeros(2)
-        total = 0
-
-        for other in fishes:
-            if other is self:
-                continue
-            distance = np.linalg.norm(self.position - other.position)
-            if distance < perception:
-                center_of_mass += other.position
-                total += 1
-        if total > 0:
-            center_of_mass /= total
-            desired = center_of_mass - self.position
-            if np.linalg.norm(desired) > 0:
-                desired = (desired / np.linalg.norm(desired)) * self.max_speed
-            steer = desired - self.velocity
-            if np.linalg.norm(steer) > self.max_force:
-                steer = (steer / np.linalg.norm(steer)) * self.max_force
-            return steer
-        return np.zeros(2)
+    def compute_behavior_metrics(self, fishes):
+        """
+        Computes the three behavioral metrics and returns them as a feature vector.
+        
+        :param fishes: List of all Fish instances.
+        :return: A numpy array [alignment, cohesion, density]
+                 These three scalars can then be fed to branch B of the network.
+        """
+        alignment = self.compute_alignment_metric(fishes)
+        cohesion = self.compute_cohesion_metric(fishes)
+        density = self.compute_density_metric(fishes)
+        return np.array([alignment, cohesion, density])
+    
 
 # -------------------------------
 # Define the Environment Class
@@ -152,7 +250,7 @@ class FishSchoolEnv:
                  dt=1, 
                  perception_range=15,
                  obs_grid_size=16,
-                 num_actions=5):  # NEW
+                 num_actions=5):
         self.num_fish = num_fish
         self.grid_size = grid_size
         self.velocity = velocity
@@ -160,7 +258,7 @@ class FishSchoolEnv:
         self.dt = dt
         self.perception_range = perception_range
         self.obs_grid_size = obs_grid_size
-        self.num_actions = num_actions  # NEW
+        self.num_actions = num_actions
 
         self.positions = np.random.rand(num_fish, 2) * grid_size
         self.orientations = np.random.uniform(0, 2 * np.pi, num_fish)
@@ -171,6 +269,7 @@ class FishSchoolEnv:
         observation = np.zeros((2, self.obs_grid_size, self.obs_grid_size))
         
         distances = np.linalg.norm(self.positions - focal_pos, axis=1)
+        # Exclude self from neighbor marking in the grid
         neighbors = np.where((distances < self.perception_range) & (distances > 0))[0]
 
         for neighbor in neighbors:
@@ -187,13 +286,60 @@ class FishSchoolEnv:
                 rel_orientation = (self.orientations[neighbor] - focal_orientation) / np.pi
                 observation[1, grid_x, grid_y] = rel_orientation
 
-        return observation  # Shape: (2, 16, 16)
+        return observation  # Shape: (2, obs_grid_size, obs_grid_size)
+
+    def get_behavior_metrics(self, fish_index):
+        """
+        Computes three behavior metrics for branch B input:
+          Alignment (phi):
+            phi = 1/(N_neighbors) * norm( sum_{i in neighbors} [cos(theta_i), sin(theta_i)] )
+          Cohesion (xi):
+            xi = (# perceived neighbors) / (total number of fish)
+          Density (ANNR):
+            D_actual = average distance to all neighbors (excluding self; default = perception_range if none)
+            D_expected = 0.5 / sqrt(total_agents / (pi * perception_range^2))
+            annr = D_actual / D_expected
+        Neighbors here are all fish (including self for alignment).
+        """
+        focal_pos = self.positions[fish_index]
+        focal_orientation = self.orientations[fish_index]
+        
+        # For metrics, consider neighbors within perception range.
+        distances = np.linalg.norm(self.positions - focal_pos, axis=1)
+        # For alignment and cohesion, include fish whose distance is <= perception_range.
+        neighbors_idx = np.where(distances <= self.perception_range)[0]
+        N_neighbors = len(neighbors_idx)
+        
+        # Alignment: sum normalized velocity vectors (derived from orientations)
+        sum_norm_vel = np.zeros(2)
+        for idx in neighbors_idx:
+            theta = self.orientations[idx]
+            norm_vec = np.array([np.cos(theta), np.sin(theta)])
+            sum_norm_vel += norm_vec
+        phi = np.linalg.norm(sum_norm_vel) / N_neighbors if N_neighbors > 0 else 0.0
+
+        # Cohesion: fraction of fish perceived (count neighbors divided by total fish)
+        xi = N_neighbors / self.num_fish
+
+        # Density: compute average distance to neighbors (excluding self)
+        other_idx = np.setdiff1d(neighbors_idx, np.array([fish_index]))
+        if len(other_idx) > 0:
+            D_actual = np.mean(distances[other_idx])
+        else:
+            D_actual = self.perception_range
+
+        A = np.pi * (self.perception_range ** 2)
+        D_expected = 0.5 / np.sqrt(self.num_fish / A)
+        annr = D_actual / D_expected
+
+        return np.array([phi, xi, annr])  # 3-dimensional feature vector
 
     def get_mean_action(self, fish_index, actions):
-        focal_pos = self.positions[fish_index]
-        distances = np.linalg.norm(self.positions - focal_pos, axis=1)
-        neighbors = np.where((distances < self.perception_range) & (distances > 0))[0]
-        return np.mean(actions[neighbors]) if len(neighbors) > 0 else 0
+        """
+        Previously, this method returned the average action of the neighbors.
+        Now, we update it to return the behavior metrics vector for the fish.
+        """
+        return self.get_behavior_metrics(fish_index)
 
     def action_to_steering(self, action_index):
         """Maps discrete action index to a continuous steering change in [-omega_max, omega_max]."""
@@ -201,36 +347,33 @@ class FishSchoolEnv:
 
     def step(self, action_indices):
         """Update fish positions using discrete actions (converted to continuous steering changes)."""
-        # Convert discrete actions to steering angles
         steering_changes = np.array([self.action_to_steering(a) for a in action_indices])
-
         self.orientations += steering_changes * self.dt
         dx = self.velocity * np.cos(self.orientations) * self.dt
         dy = self.velocity * np.sin(self.orientations) * self.dt
 
+        # Wrap around grid boundaries
         self.positions[:, 0] = (self.positions[:, 0] + dx) % self.grid_size
         self.positions[:, 1] = (self.positions[:, 1] + dy) % self.grid_size
 
     def get_reward(self, fish_index):
+        """
+        Computes reward:
+           R = 0.1 * (# perceived neighbors) - 0.1 * (# collisions)
+        A collision is defined as when the distance between two fish is less than a threshold.
+        """
         focal_pos = self.positions[fish_index]
         distances = np.linalg.norm(self.positions - focal_pos, axis=1)
+        # Perceived neighbors: exclude self (distance > 0) and within perception range.
         neighbors = np.where((distances < self.perception_range) & (distances > 0))[0]
-
         num_neighbors = len(neighbors)
-        if num_neighbors == 0:
-            return -1.0
 
-        # Alignment
-        alignments = np.cos(self.orientations[neighbors] - self.orientations[fish_index])
-        alignment_score = np.mean(alignments)
+        # Collision threshold: set to 1.0 (this can be adjusted if needed)
+        collision_threshold = 1.0
+        collisions = np.where((distances < collision_threshold) & (distances > 0))[0]
+        num_collisions = len(collisions)
 
-        # Cohesion (inverse of distance to center of mass)
-        center_of_mass = np.mean(self.positions[neighbors], axis=0)
-        cohesion_score = -np.linalg.norm(center_of_mass - self.positions[fish_index])
-
-        reward = 0.5 * alignment_score + 0.5 * cohesion_score
-        if num_neighbors > 10:
-            reward -= 1.0
+        reward = 0.1 * num_neighbors - 0.1 * num_collisions
         return reward
 
     def render(self):
@@ -247,21 +390,22 @@ class FishSchoolEnv:
         ani = animation.FuncAnimation(fig, update, frames=100, interval=100)
         plt.show()
 
-# -------------------------------
-# Define the ReplayBuffer Class
-# -------------------------------
 
 class ReplayBuffer:
     def __init__(self, capacity=10000):
         self.buffer = deque(maxlen=capacity)
         
-    def push(self, state, mean_action, action, reward, next_state, next_mean_action, done):
-        self.buffer.append((state, mean_action, action, reward, next_state, next_mean_action, done))
+    def push(self, state, behavior, action, reward, next_state, next_behavior, done):
+        self.buffer.append((state, behavior, action, reward, next_state, next_behavior, done))
         
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        state, mean_action, action, reward, next_state, next_mean_action, done = map(np.array, zip(*batch))
-        return state, mean_action, action, reward, next_state, next_mean_action, done
+        state, behavior, action, reward, next_state, next_behavior, done = map(
+            lambda x: list(x), zip(*batch)
+        )
+        return state, behavior, action, reward, next_state, next_behavior, done
     
     def __len__(self):
         return len(self.buffer)
+    
+

@@ -1,19 +1,25 @@
 import numpy as np
 import torch
-from model_TS import FishSchoolEnv
-from model_TS import MeanFieldQNetwork  # assume you defined it elsewhere
-from model_TS import ReplayBuffer  # your replay buffer
 import torch.nn.functional as F
+import torch.nn as nn
+from model_TS import FishSchoolEnv
+from model_TS import MultiAgentNet  # Your pre-defined network with three branches.
+from model_TS import ReplayBuffer  # Your replay buffer
 
 NUM_ACTIONS = 5
-STATE_DIM = 512  # 2x16x16 = 512
 ACTION_DIM = NUM_ACTIONS
 
 env = FishSchoolEnv(num_fish=50, grid_size=60, velocity=3, perception_range=15, obs_grid_size=16, num_actions=NUM_ACTIONS)
 
+# Instantiate networks.
+q_network = MultiAgentNet()  # Uses your defined three-branch architecture.
+target_network = MultiAgentNet()
 
-q_network = MeanFieldQNetwork(state_dim=STATE_DIM, action_dim=ACTION_DIM)
-target_network = MeanFieldQNetwork(state_dim=STATE_DIM, action_dim=ACTION_DIM)
+# Fix the branch-A linear layer (spatial_fc) so that it has the proper input size.
+# The spatial observation is of shape (2, 16, 16) => flattened to 512.
+q_network.spatial_fc[1] = nn.Linear(512, 256)
+target_network.spatial_fc[1] = nn.Linear(512, 256)
+
 target_network.load_state_dict(q_network.state_dict())
 optimizer = torch.optim.Adam(q_network.parameters(), lr=1e-3)
 replay_buffer = ReplayBuffer(capacity=10000)
@@ -25,76 +31,96 @@ num_episodes = 500
 batch_size = 64
 gamma = 0.99
 
-
-
 for episode in range(num_episodes):
-    states = []
+    # Lists for storing the three components of state and next state.
+    spatial_states = []
+    branchB_states = []  # Behavior metrics (padded to size 4)
+    branchC_states = []  # Dummy values (size 2)
     actions = np.zeros(env.num_fish, dtype=int)
-    mean_actions = np.zeros(env.num_fish)
-    rewards = np.zeros(env.num_fish)
-    next_states = []
+    spatial_next_states = []
+    branchB_next_states = []
+    branchC_next_states = []
 
     episode_loss = 0
 
+    # Choose actions for each fish.
     for fish_index in range(env.num_fish):
-        obs = env.get_state(fish_index)
-        mean_act = env.get_mean_action(fish_index, actions)
-        obs_tensor = torch.FloatTensor(obs.flatten()).unsqueeze(0)  # Shape: (1, 512)
-        mean_act_tensor = torch.FloatTensor([mean_act])
+        obs = env.get_state(fish_index)  # shape: (2, 16, 16)
+        behav_feat = env.get_mean_action(fish_index, actions)  # returns a 3-element vector
+        # Pad behavior metrics to length 4 for branch B.
+        branchB_input = np.pad(behav_feat, (0, 1), mode='constant')   # shape: (4,)
+        # For branch C, supply a dummy vector (size 2).
+        branchC_input = np.zeros(2, dtype=float)
 
+        # Build input tensors for the Q-network.
+        spatial_tensor = torch.FloatTensor(obs).unsqueeze(0)         # (1, 2, 16, 16)
+        branchB_tensor = torch.FloatTensor(branchB_input).unsqueeze(0) # (1, 4)
+        branchC_tensor = torch.FloatTensor(branchC_input).unsqueeze(0) # (1, 2)
+
+        # Epsilon-greedy policy.
         if np.random.rand() < epsilon:
             action = np.random.randint(0, NUM_ACTIONS)
         else:
             with torch.no_grad():
-                input_tensor = torch.cat([obs_tensor, mean_act_tensor.unsqueeze(1)], dim=1)
-                q_vals = q_network(input_tensor)                
+                q_vals = q_network(spatial_tensor, branchB_tensor, branchC_tensor)
                 action = q_vals.argmax().item()
 
         actions[fish_index] = action
-        states.append(obs)
-        mean_actions[fish_index] = mean_act
+        spatial_states.append(obs)
+        branchB_states.append(branchB_input)
+        branchC_states.append(branchC_input)
 
-    # Apply all fish actions at once
+    # Apply all fish actions at once.
     env.step(actions)
 
+    # Store transitions for each fish.
     for fish_index in range(env.num_fish):
         next_obs = env.get_state(fish_index)
-        next_mean_act = env.get_mean_action(fish_index, actions)
+        next_behav_feat = env.get_mean_action(fish_index, actions)
+        next_branchB_input = np.pad(next_behav_feat, (0, 1), mode='constant')
+        next_branchC_input = np.zeros(2, dtype=float)
         reward = env.get_reward(fish_index)
 
+        spatial_next_states.append(next_obs)
+        branchB_next_states.append(next_branchB_input)
+        branchC_next_states.append(next_branchC_input)
+
         replay_buffer.push(
-            states[fish_index],
-            mean_actions[fish_index],
+            (spatial_states[fish_index], branchB_states[fish_index], branchC_states[fish_index]),   # state tuple
+            branchB_states[fish_index],   # mean_action (branch B features for current state)
             actions[fish_index],
             reward,
-            next_obs,
-            next_mean_act,
-            done=1  # always 1 for now
+            (spatial_next_states[fish_index], branchB_next_states[fish_index], branchC_next_states[fish_index]),  # next_state tuple
+            branchB_next_states[fish_index],   # next_mean_action (branch B for next state)
+            done=1
         )
 
-    # Update Q-network from replay buffer
+    # Update Q-network from replay buffer.
     if len(replay_buffer) > batch_size:
-        states, mean_actions, actions, rewards, next_states, next_mean_actions, dones = replay_buffer.sample(batch_size)
+        # The replay buffer now returns a tuple for state and next_state in the form:
+        # (spatial, branchB, branchC), action, reward, (spatial, branchB, branchC), done.
+        states, mean_actions, actions_batch, rewards_batch, next_states, next_mean_actions, dones_batch = replay_buffer.sample(batch_size)
+        
+        # Unpack the state components.
+        spatial_batch = torch.FloatTensor(np.array([s[0] for s in states]))  # (batch, 2, 16, 16)
+        branchB_batch = torch.FloatTensor(np.array([s[1] for s in states]))   # (batch, 4)
+        branchC_batch = torch.FloatTensor(np.array([s[2] for s in states]))   # (batch, 2)
 
+        next_spatial_batch = torch.FloatTensor(np.array([s[0] for s in next_states]))
+        next_branchB_batch = torch.FloatTensor(np.array([s[1] for s in next_states]))
+        next_branchC_batch = torch.FloatTensor(np.array([s[2] for s in next_states]))
 
-        state_batch = torch.FloatTensor(np.array([s.flatten() for s in states]))        
-        mean_action_batch = torch.FloatTensor(mean_actions).unsqueeze(1)
-        action_batch = torch.LongTensor(actions).unsqueeze(1)
-        reward_batch = torch.FloatTensor(rewards)
-        next_state_batch = torch.FloatTensor(np.array([s.flatten() for s in next_states]))
-        next_mean_action_batch = torch.FloatTensor(next_mean_actions).unsqueeze(1)
-        done_batch = torch.FloatTensor(dones)
+        action_batch = torch.LongTensor(actions_batch).unsqueeze(1)
+        reward_batch = torch.FloatTensor(rewards_batch)
+        done_batch = torch.FloatTensor(dones_batch)
 
-
-        # Q(s,a)
-        input_tensor = torch.cat([state_batch, mean_action_batch], dim=1)
-        q_values = q_network(input_tensor)
+        # Q(s,a) from current network.
+        q_values = q_network(spatial_batch, branchB_batch, branchC_batch)
         q_value = q_values.gather(1, action_batch).squeeze(1)
 
-        # max Q'(s', a')
+        # Target Q-values from target network.
         with torch.no_grad():
-            next_input_tensor = torch.cat([next_state_batch, next_mean_action_batch], dim=1)
-            next_q_values = target_network(next_input_tensor)
+            next_q_values = target_network(next_spatial_batch, next_branchB_batch, next_branchC_batch)
             next_q_value = next_q_values.max(1)[0]
 
         expected_q_value = reward_batch + gamma * next_q_value * (1 - done_batch)
@@ -107,7 +133,7 @@ for episode in range(num_episodes):
 
         episode_loss += loss.item()
 
-    # Sync target network every few episodes (optional)
+    # Sync target network every 10 episodes.
     if episode % 10 == 0:
         target_network.load_state_dict(q_network.state_dict())
 

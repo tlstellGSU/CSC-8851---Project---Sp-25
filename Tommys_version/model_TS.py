@@ -43,9 +43,9 @@ class MultiAgentNet(nn.Module):
         dummy_input = torch.zeros(1, spatial_channels, obs_size, obs_size)
         dummy_output = self.spatial_conv(dummy_input)
         flattened_size = dummy_output.view(1, -1).size(1)
-        print("Dynamically computed flattened_size for spatial_fc:", flattened_size)
+        #print("Dynamically computed flattened_size for spatial_fc:", flattened_size)
         # Create spatial_fc using the computed size.
-        print("Dummy output shape:", dummy_output.shape)
+        #print("Dummy output shape:", dummy_output.shape)
 
         self.spatial_fc = nn.Sequential(
             nn.Flatten(),

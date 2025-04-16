@@ -15,6 +15,9 @@ env = FishSchoolEnv(num_fish=50, grid_size=60, velocity=3, perception_range=15, 
 q_network = MultiAgentNet()  # Uses your defined three-branch architecture.
 target_network = MultiAgentNet()
 
+
+#print(q_network)
+
 # Fix the branch-A linear layer (spatial_fc) so that it has the proper input size.
 # The spatial observation is of shape (2, 16, 16) => flattened to 512.
 q_network.spatial_fc[1] = nn.Linear(512, 256)

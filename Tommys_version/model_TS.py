@@ -14,19 +14,21 @@ import torch.nn.functional as F
 
 class MultiAgentNet(nn.Module):
     def __init__(self, spatial_channels=2, orientation_dim=3, action_reward_dim=2, 
-                 num_actions=5, dropout_p=0.3):
+                 num_actions=5, dropout_p=0.3, obs_size=16):
         """
-        :param spatial_channels: Number of input channels for spatial observations (default: 2)
-        :param orientation_dim: Size of orientation input (4 per agent)
-        :param action_reward_dim: Size of last action + last reward input (default: 2)
-        :param num_actions: M — number of possible actions
-        :param dropout_p: Dropout probability
+        :param spatial_channels: Number of input channels for spatial observations.
+        :param orientation_dim: Dimension for orientation/behavior input.
+        :param action_reward_dim: Dimension for last action + reward input.
+        :param num_actions: Number of possible actions (M).
+        :param dropout_p: Dropout probability.
+        :param obs_size: Spatial observation width/height (default: 16).
         """
         super(MultiAgentNet, self).__init__()
-        self.num_outputs = 2 * num_actions + 1
+        self.num_outputs = 2 * num_actions + 1  # As per your design.
         self.dropout_p = dropout_p
 
-        # Branch A - Spatial input (shape: [B, 2, H, W], where H=W=2k+1)
+        # ---- Branch A: Spatial Input ----
+        # Input shape: [B, spatial_channels, obs_size, obs_size]
         self.spatial_conv = nn.Sequential(
             nn.Conv2d(spatial_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -37,62 +39,63 @@ class MultiAgentNet(nn.Module):
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.ReLU()
         )
-
-        # This linear layer will convert the flattened spatial features to 256
+        # Use a dummy input to compute the flattened feature size.
+        dummy_input = torch.zeros(1, spatial_channels, obs_size, obs_size)
+        dummy_output = self.spatial_conv(dummy_input)
+        flattened_size = dummy_output.view(1, -1).size(1)
+        print("Dynamically computed flattened_size for spatial_fc:", flattened_size)
+        # Create spatial_fc using the computed size.
         self.spatial_fc = nn.Sequential(
             nn.Flatten(),
-            nn.LazyLinear(256),  # ← This is now correct
+            nn.Linear(flattened_size, 256),  # This should be Linear(8192, 256) if flattened_size is 8192.
             nn.ReLU(),
             nn.Dropout(p=dropout_p)
         )
-        # Branch B - Orientation input
+        # (For debugging, you can print the weight shape:)
+        # print("Spatial fc Linear weight shape:", self.spatial_fc[1].weight.shape)
+
+        # ---- Branch B: Orientation / Behavior Input ----
         self.orientation_fc = nn.Sequential(
             nn.Linear(orientation_dim, 32),
             nn.ReLU(),
             nn.Dropout(p=dropout_p)
         )
 
-        # Branch C - Last action + reward
+        # ---- Branch C: Last Action + Reward Input ----
         self.action_reward_fc = nn.Sequential(
             nn.Linear(action_reward_dim, 32),
             nn.ReLU(),
             nn.Dropout(p=dropout_p)
         )
 
-        # Final fully connected layers
+        # ---- Final Fully Connected Layers ----
         self.fc1 = nn.Sequential(
             nn.Linear(256 + 32 + 32, 128),
             nn.ReLU(),
             nn.Dropout(p=dropout_p)
         )
-
         self.fc2 = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(p=dropout_p)
         )
-
         self.output_layer = nn.Linear(64, self.num_outputs)
 
     def forward(self, spatial_input, orientation_input, action_reward_input):
+        # Branch A
         x_spatial = self.spatial_conv(spatial_input)
-        print(f"Flattened spatial shape: {x_spatial.shape}")        
-        if isinstance(self.spatial_fc[1], nn.Linear) and self.spatial_fc[1].in_features is None:
-            # Dynamically set the input size for the first Linear layer in spatial_fc
-            flattened_size = x_spatial.view(x_spatial.size(0), -1).size(1)
-            self.spatial_fc[1] = nn.Linear(flattened_size, 256).to(x_spatial.device)
-        
-        x_spatial = self.spatial_fc(x_spatial)
-
+        x_spatial = self.spatial_fc(x_spatial)  # Now uses correct input size.
+        # Branch B
         x_orient = self.orientation_fc(orientation_input)
+        # Branch C
         x_action = self.action_reward_fc(action_reward_input)
-
+        # Concatenate
         x = torch.cat([x_spatial, x_orient, x_action], dim=1)
         x = self.fc1(x)
         x = self.fc2(x)
-
         out = self.output_layer(x)
         return F.softmax(out, dim=1)
+
 
 # -------------------------------
 # Define the Fish Agent Class

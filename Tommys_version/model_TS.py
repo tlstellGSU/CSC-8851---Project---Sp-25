@@ -13,7 +13,7 @@ import torch.nn.functional as F
 # -------------------------------
 
 class MultiAgentNet(nn.Module):
-    def __init__(self, spatial_channels=2, orientation_dim=3, action_reward_dim=2, 
+    def __init__(self, spatial_channels=2, orientation_dim=4, action_reward_dim=2, 
                  num_actions=5, dropout_p=0.3, obs_size=16):
         """
         :param spatial_channels: Number of input channels for spatial observations.
@@ -45,6 +45,8 @@ class MultiAgentNet(nn.Module):
         flattened_size = dummy_output.view(1, -1).size(1)
         print("Dynamically computed flattened_size for spatial_fc:", flattened_size)
         # Create spatial_fc using the computed size.
+        print("Dummy output shape:", dummy_output.shape)
+
         self.spatial_fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(flattened_size, 256),  # This should be Linear(8192, 256) if flattened_size is 8192.

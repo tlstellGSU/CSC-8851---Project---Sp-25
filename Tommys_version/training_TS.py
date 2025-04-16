@@ -20,8 +20,6 @@ target_network = MultiAgentNet()
 
 # Fix the branch-A linear layer (spatial_fc) so that it has the proper input size.
 # The spatial observation is of shape (2, 16, 16) => flattened to 512.
-q_network.spatial_fc[1] = nn.Linear(512, 256)
-target_network.spatial_fc[1] = nn.Linear(512, 256)
 
 target_network.load_state_dict(q_network.state_dict())
 optimizer = torch.optim.Adam(q_network.parameters(), lr=1e-3)

@@ -6,14 +6,22 @@ from model_TS import FishSchoolEnv
 from model_TS import MultiAgentNet  # Your pre-defined network with three branches.
 from model_TS import ReplayBuffer  # Your replay buffer
 
-NUM_ACTIONS = 5
+NUM_ACTIONS = 137
 ACTION_DIM = NUM_ACTIONS
 
-env = FishSchoolEnv(num_fish=50, grid_size=60, velocity=3, perception_range=15, obs_grid_size=16, num_actions=NUM_ACTIONS)
+env = FishSchoolEnv(num_fish=200, 
+                    grid_size=60, 
+                    velocity=3, 
 
-# Instantiate networks.
-q_network = MultiAgentNet()  # Uses your defined three-branch architecture.
-target_network = MultiAgentNet()
+                    perception_range=15, 
+                    #perception_range = np.random.normal(15, 2),
+
+                    obs_grid_size=16, 
+                    num_actions=NUM_ACTIONS)
+
+# instantiate Q‑nets with the right action count:
+q_network      = MultiAgentNet(num_actions=NUM_ACTIONS)
+target_network = MultiAgentNet(num_actions=NUM_ACTIONS)
 
 
 #print(q_network)
@@ -28,7 +36,7 @@ replay_buffer = ReplayBuffer(capacity=10000)
 epsilon = 1.0
 epsilon_decay = 0.995
 epsilon_min = 0.1
-num_episodes = 500
+num_episodes = 1000
 batch_size = 64
 gamma = 0.99
 

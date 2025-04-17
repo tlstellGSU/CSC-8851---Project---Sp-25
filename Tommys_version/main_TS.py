@@ -1,88 +1,97 @@
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from IPython.display import HTML, display
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
-from model_TS import FishSchoolEnv
-from model_TS import MultiAgentNet  # Make sure your model class is in q_network.py
+from model_TS import FishSchoolEnv, MultiAgentNet
 
-# Parameters (make sure these match your training setup)
-NUM_FISH = 50
-GRID_SIZE = 60
-OBS_GRID_SIZE = 16
-VELOCITY = 3
-PERCEPTION_RANGE = 15
-NUM_ACTIONS = 5
+# -------------------------------
+# 1. Load trained Q‑network
+# -------------------------------
+NUM_ACTIONS = 137
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load trained Q-network
-q_network = MultiAgentNet(
-    spatial_channels=2, 
-    orientation_dim=4, 
-    action_reward_dim=2, 
-    num_actions=NUM_ACTIONS, 
-    obs_size=OBS_GRID_SIZE
-)
-
-q_network.load_state_dict(torch.load("mean_field_q_network.pth"))
+q_network = MultiAgentNet(num_actions=NUM_ACTIONS).to(device)
+q_network.load_state_dict(torch.load("mean_field_q_network.pth", map_location=device))
 q_network.eval()
 
-# Initialize environment
-env = FishSchoolEnv(num_fish=NUM_FISH, 
-                    grid_size=GRID_SIZE, 
-                    velocity=VELOCITY, 
-                    perception_range=PERCEPTION_RANGE, 
-                    obs_grid_size=OBS_GRID_SIZE)
+# -------------------------------
+# 2. Instantiate environment
+# -------------------------------
+env = FishSchoolEnv(
+    num_fish=200,
+    grid_size=60,
+    velocity=3,
+    perception_range=15,
+    obs_grid_size=16,
+    num_actions=NUM_ACTIONS
+)
 
-# Set up the figure and axes
+# -------------------------------
+# 3. Set up matplotlib figure
+# -------------------------------
 fig, ax = plt.subplots(figsize=(6, 6))
+ax.set_xlim(0, env.grid_size)
+ax.set_ylim(0, env.grid_size)
+ax.set_aspect('equal')
 
-def update(frame):
-    ax.clear()
-    ax.set_xlim(0, env.grid_size)
-    ax.set_ylim(0, env.grid_size)
-    ax.set_title(f"Fish Schooling Simulation - Frame {frame}")
+# Initial positions and directions
+xs = env.positions[:, 0]
+ys = env.positions[:, 1]
+# Arrow components: unit vectors (we'll scale by a constant for visibility)
+Us = np.cos(env.orientations)
+Vs = np.sin(env.orientations)
 
-    actions = []
+# Create the quiver plot: arrows centered at (x,y), pointing (U,V)
+quiv = ax.quiver(xs, ys, Us, Vs,
+                 angles='xy', scale_units='xy', scale=1.5,
+                 width=0.005, headwidth=3, headlength=5)
 
+# -------------------------------
+# 4. Animation update function
+# -------------------------------
+def update(frame_num):
+    actions = np.zeros(env.num_fish, dtype=int)
+
+    # 4A. Choose actions via Q-network
     for i in range(env.num_fish):
-        # Get the state of fish i
-        observation = env.get_state(i)
-        print(f"State for fish {i}: {observation.shape}")  # Debugging line
-        
-        # Split the observation into spatial and orientation components
-        spatial_obs = observation[0]  # Shape: (obs_grid_size, obs_grid_size)
-        orientation_obs = observation[1]  # Shape: (obs_grid_size, obs_grid_size)
+        obs = env.get_state(i)                                # (2,16,16)
+        behav = env.get_mean_action(i, actions)               # (3,)
+        branchB = np.pad(behav, (0, 1), mode='constant')      # (4,)
+        branchC = np.zeros(2, dtype=float)                    
 
-        # Convert each part into tensors
-        spatial_tensor = torch.FloatTensor(spatial_obs).unsqueeze(0)  # shape (1, 1, obs_grid_size, obs_grid_size)
-        orientation_tensor = torch.FloatTensor(orientation_obs).unsqueeze(0)  # shape (1, 1, obs_grid_size, obs_grid_size)
+        s_t = torch.FloatTensor(obs).unsqueeze(0).to(device)
+        bB_t = torch.FloatTensor(branchB).unsqueeze(0).to(device)
+        bC_t = torch.FloatTensor(branchC).unsqueeze(0).to(device)
 
-        # Concatenate spatial and orientation tensors along the channel dimension
-        input_tensor = torch.cat([spatial_tensor, orientation_tensor], dim=1)  # Shape: (1, 2, obs_grid_size, obs_grid_size)
-
-        # You may need to change how you pass action_reward if it's not part of the state
-        action_reward_tensor = torch.zeros(1, 2)  # Action-reward input can be handled as zeros or based on your model
-
-        # Pass each tensor as an input to the network
         with torch.no_grad():
-            q_vals = q_network(input_tensor, action_reward_tensor)
+            q_vals = q_network(s_t, bB_t, bC_t)
+            actions[i] = q_vals.argmax(dim=1).item()
 
-        # Choose action based on max Q-value
-        action = q_vals.argmax().item()
-
-        actions.append(action)
-
-    # Update environment with the chosen actions
+    # 4B. Step environment
     env.step(actions)
 
-    # Plot positions of fish in the environment
-    ax.scatter(env.positions[:, 0], env.positions[:, 1], c='blue', marker='o')
+    # 4C. Update arrow positions and directions
+    xs = env.positions[:, 0]
+    ys = env.positions[:, 1]
+    Us = np.cos(env.orientations)
+    Vs = np.sin(env.orientations)
 
-# Create animation
-global anim
-anim = animation.FuncAnimation(fig, update, frames=200, interval=50)
+    quiv.set_offsets(np.stack([xs, ys], axis=1))
+    quiv.set_UVC(Us, Vs)
 
-# Display animation in notebook
-html_anim = HTML(anim.to_jshtml())
-display(html_anim)
+    return quiv,
+
+# -------------------------------
+# 5. Run the animation
+# -------------------------------
+ani = animation.FuncAnimation(
+    fig,
+    update,
+    frames=200,
+    interval=100,
+    blit=True
+)
+
+plt.tight_layout()
+plt.show()

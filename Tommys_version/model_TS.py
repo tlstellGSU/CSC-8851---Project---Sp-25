@@ -104,10 +104,10 @@ class MultiAgentNet(nn.Module):
 # -------------------------------
 
 class Fish:
-    def __init__(self, position, orientation, max_speed=4.0, omega_max=np.pi/4, M=9, 
+    def __init__(self, position, orientation, max_speed=4.0, omega_max=np.pi/6, M=9, 
                  
-                 #perception_radius=np.random.normal(15,2)
-                 perception_radius=15
+                 perception_radius=np.random.normal(25,5)
+                 #perception_radius=15
                  
                  ):
         """
@@ -378,7 +378,7 @@ class FishSchoolEnv:
         collisions = np.where((distances < collision_threshold) & (distances > 0))[0]
         num_collisions = len(collisions)
 
-        reward = 0.1 * num_neighbors - 0.1 * num_collisions
+        reward = 0.4 * num_neighbors - 0.1 * num_collisions
         return reward
 
     def render(self):

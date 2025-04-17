@@ -5,16 +5,17 @@ import torch.nn as nn
 from model_TS import FishSchoolEnv
 from model_TS import MultiAgentNet  # Your pre-defined network with three branches.
 from model_TS import ReplayBuffer  # Your replay buffer
+import matplotlib.pyplot as plt
 
 NUM_ACTIONS = 137
 ACTION_DIM = NUM_ACTIONS
 
-env = FishSchoolEnv(num_fish=200, 
-                    grid_size=60, 
+env = FishSchoolEnv(num_fish=50, 
+                    grid_size=120, 
                     velocity=3, 
 
-                    perception_range=15, 
-                    #perception_range = np.random.normal(15, 2),
+                    #perception_range=15, 
+                    perception_range = np.random.normal(15, 2),
 
                     obs_grid_size=16, 
                     num_actions=NUM_ACTIONS)
@@ -39,6 +40,8 @@ epsilon_min = 0.1
 num_episodes = 1000
 batch_size = 64
 gamma = 0.99
+
+total_loss = []
 
 for episode in range(num_episodes):
     # Lists for storing the three components of state and next state.
@@ -142,6 +145,8 @@ for episode in range(num_episodes):
 
         episode_loss += loss.item()
 
+    total_loss.append(episode_loss)
+
     # Sync target network every 10 episodes.
     if episode % 10 == 0:
         target_network.load_state_dict(q_network.state_dict())
@@ -149,4 +154,18 @@ for episode in range(num_episodes):
     epsilon = max(epsilon * epsilon_decay, epsilon_min)
     print(f"Episode {episode+1} complete - loss: {episode_loss:.3f}")
 
-torch.save(q_network.state_dict(), "mean_field_q_network.pth")
+torch.save(q_network.state_dict(), "mean_field_q_network_stochastic.pth")
+
+plt.figure(figsize=(10, 5))
+plt.plot(total_loss, label="Loss per Episode")
+plt.xlabel("Episode")
+plt.ylabel("Loss")
+plt.title("Training Loss vs Episode")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+# Save the figure
+plt.savefig("loss_vs_episode_stochast.png", dpi=300)
+plt.show()
+

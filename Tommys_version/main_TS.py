@@ -13,7 +13,7 @@ NUM_ACTIONS = 137   # or 137, whatever you trained with
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 q_network = MultiAgentNet(num_actions=NUM_ACTIONS).to(device)
-q_network.load_state_dict(torch.load("mean_field_q_network_stochastic.pth", map_location=device))
+q_network.load_state_dict(torch.load("mean_field_q_network.pth", map_location=device))
 q_network.eval()
 
 # -------------------------------
@@ -23,7 +23,8 @@ env = FishSchoolEnv(
     num_fish=50,
     grid_size=60,
     velocity=3,
-    perception_range=15,
+    perception_range=3,
+    #perception_range=np.random.normal(15, 2),
     obs_grid_size=16,
     num_actions=NUM_ACTIONS
 )
@@ -31,7 +32,7 @@ env = FishSchoolEnv(
 # -------------------------------
 # 3. Prepare trails
 # -------------------------------
-trail_length = 1  # how many past positions to show
+trail_length = 3  # how many past positions to show
 # one deque per fish, storing (x, y)
 trails = [deque(maxlen=trail_length) for _ in range(env.num_fish)]
 # initialize with the starting positions
@@ -89,10 +90,21 @@ def update(frame_num):
     # 5C. Update trails & line plots
     for i, line in enumerate(lines):
         x_i, y_i = env.positions[i]
-        trails[i].append((x_i, y_i))
+        
+        # Only add to trail if movement is not too large
+        if trails[i]:
+            prev_x, prev_y = trails[i][-1]
+            dist = np.hypot(x_i - prev_x, y_i - prev_y)
+            if dist <= env.grid_size / 2:
+                trails[i].append((x_i, y_i))
+            else:
+                trails[i].clear()
+                trails[i].append((x_i, y_i))
+        else:
+            trails[i].append((x_i, y_i))
+
         xs_trail, ys_trail = zip(*trails[i])
         line.set_data(xs_trail, ys_trail)
-
     # 5D. Update quiver arrows
     xs = env.positions[:, 0]
     ys = env.positions[:, 1]
@@ -109,8 +121,8 @@ def update(frame_num):
 ani = animation.FuncAnimation(
     fig,
     update,
-    frames=300,
-    interval=100,
+    frames=3000,
+    interval=1000,
     blit=True
 )
 

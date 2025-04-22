@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 NUM_ACTIONS = 137
 ACTION_DIM = NUM_ACTIONS
 
-env = FishSchoolEnv(num_fish=50, 
-                    grid_size=120, 
+env = FishSchoolEnv(num_fish=100, 
+                    grid_size=100, 
                     velocity=3, 
 
-                    #perception_range=15, 
-                    perception_range = np.random.normal(15, 2),
+                   # perception_range=3, 
+                    perception_range = np.random.normal(15, 3),
 
                     obs_grid_size=16, 
                     num_actions=NUM_ACTIONS)
@@ -39,7 +39,7 @@ epsilon_decay = 0.995
 epsilon_min = 0.1
 num_episodes = 1000
 batch_size = 64
-gamma = 0.99
+gamma = 0.95
 
 total_loss = []
 
@@ -154,7 +154,7 @@ for episode in range(num_episodes):
     epsilon = max(epsilon * epsilon_decay, epsilon_min)
     print(f"Episode {episode+1} complete - loss: {episode_loss:.3f}")
 
-torch.save(q_network.state_dict(), "mean_field_q_network_stochastic.pth")
+torch.save(q_network.state_dict(), "mean_field_q_network.pth")
 
 plt.figure(figsize=(10, 5))
 plt.plot(total_loss, label="Loss per Episode")
